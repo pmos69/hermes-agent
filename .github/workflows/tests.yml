@@ -57,8 +57,20 @@ jobs:
       - name: Run tests
         # Architecture:
         #   * One job per platform (this one is Linux).
-        #   * xdist (-n auto) schedules tests in parallel across N worker
-        #     processes (N = CPU count on the runner).
+        #   * xdist schedules tests in parallel across N worker processes.
+        #     With subprocess-per-test isolation (tests/_isolate_plugin.py)
+        #     each worker mostly sits in proc.join() while a spawned child
+        #     does the I/O-bound work of booting a fresh interpreter +
+        #     re-collecting + running the test. That makes the workload
+        #     mostly I/O-bound during startup, so oversubscribing cores
+        #     2x is a win (workers and children alternate on CPU).
+        #
+        #     Local benchmark on a 16-core box, 632-test subset:
+        #       -n 4:  146s    -n 16: 75s
+        #       -n 8:   94s    -n 32: 72s  ← 2x cores = sweet spot
+        #                       -n 64: 81s  (oversubscription pain)
+        #
+        #     ubuntu-latest is a 4-core runner, so -n 8 is the equivalent.
         #   * Each xdist worker delegates the actual test execution to a
         #     fresh subprocess via tests/_isolate_plugin.py (spawn start
         #     method). This guarantees no module-level state leaks
@@ -68,8 +80,12 @@ jobs:
         # modules — NOT switching to fork.
         run: |
           source .venv/bin/activate
+          # 2x logical CPU count — see comment above for why we oversubscribe.
+          NPROCS=$(nproc)
+          WORKERS=$((NPROCS * 2))
+          echo "Running with -n $WORKERS (nproc=$NPROCS)"
           python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e --tb=short \
-            -n auto --timeout=30 --timeout-method=signal
+            -n "$WORKERS" --timeout=30 --timeout-method=signal
         env:
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
